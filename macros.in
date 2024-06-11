@@ -145,8 +145,8 @@
 #%__systemd_sysusers	@__SYSTEMD_SYSUSERS@
 %__systemd_sysusers	%{_rpmconfigdir}/sysusers.sh
 
-# User / group backend database lookup order, the only currently supported
-# value is "files"
+# User / group backend database lookup order. Possible values are "files",
+# "nss files" or "files nss"
 %_user_group_dbs        files
 %_user_group_dbs_chroot files
 

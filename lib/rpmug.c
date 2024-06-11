@@ -8,6 +8,9 @@
 #include <cstdlib>
 
 #include <errno.h>
+#include <sys/types.h>
+#include <pwd.h>
+#include <grp.h>
 
 #include <rpm/rpmlog.h>
 #include <rpm/rpmstring.h>
@@ -59,6 +62,72 @@ struct rpmug_s {
 };
 
 static __thread struct rpmug_s *rpmug = NULL;
+
+/* ------------------ NSS ops */
+
+template<class F, class Key, class Val>
+int nss_lookup(F *func, int max_size_var_name, const Key &in, Val &out)
+{
+    long bufsize = sysconf(max_size_var_name);
+    if (bufsize == -1)
+	bufsize = 16384; /* See man getpwnam_r() */
+
+    do {
+	char buf[bufsize];
+	Val *result;
+	errno = 0;
+	if (func(in, &out, buf, bufsize, &result) == 0)
+	    return result == nullptr ? -1 : 0;
+	bufsize <<= 1;
+    } while (errno == ERANGE);
+
+    return -1;
+}
+
+static int nss_lookup_uid(const string &uname, uid_t &uid)
+{
+    struct passwd pwd;
+    if (nss_lookup(getpwnam_r, _SC_GETPW_R_SIZE_MAX, uname.c_str(), pwd))
+	return -1;
+    uid = pwd.pw_uid;
+    return 0;
+}
+
+static int nss_lookup_gid(const string &gname, gid_t &gid)
+{
+    struct group grp;
+    if (nss_lookup(getgrnam_r, _SC_GETGR_R_SIZE_MAX, gname.c_str(), grp))
+	return -1;
+    gid = grp.gr_gid;
+    return 0;
+}
+
+static int nss_lookup_uname(const uid_t &uid, string &uname)
+{
+    struct passwd pwd;
+    if (nss_lookup(getpwuid_r, _SC_GETPW_R_SIZE_MAX, uid, pwd))
+	return -1;
+    uname = pwd.pw_name;
+    return 0;
+}
+
+static int nss_lookup_grname(const gid_t &gid, string &gname)
+{
+    struct group grp;
+    if (nss_lookup(getgrgid_r, _SC_GETGR_R_SIZE_MAX, gid, grp))
+	return -1;
+    gname = grp.gr_name;
+    return 0;
+}
+
+static struct ops_s nss_ops = {
+    nss_lookup_uid,
+    nss_lookup_gid,
+    nss_lookup_uname,
+    nss_lookup_grname,
+};
+
+REGISTER_OPS("nss", nss_ops);
 
 /* ------------------ files ops */
 

@@ -1,9 +1,14 @@
 #include "system.h"
 
 #include <unordered_map>
+#include <map>
 #include <string>
+#include <sstream>
+#include <vector>
+#include <cstdlib>
 
 #include <errno.h>
+
 #include <rpm/rpmlog.h>
 #include <rpm/rpmstring.h>
 #include <rpm/rpmmacro.h>
@@ -11,20 +16,51 @@
 #include "misc.h"
 #include "rpmug.h"
 #include "debug.h"
+#include "rpmchroot.h"
 
 using std::unordered_map;
 using std::string;
+using std::vector;
+using std::map;
+using std::istringstream;
+
+struct ops_s {
+
+    int (*lookup_uid)(const string &uname, uid_t &val);
+    int (*lookup_gid)(const string &uname, gid_t &val);
+    int (*lookup_uname)(const uid_t &gid, string &val);
+    int (*lookup_gname)(const gid_t &uid, string &val);
+
+    struct add {
+	add(const string &name, const struct ops_s *ops) {
+	    dbs[name] = ops;
+	}
+    };
+
+    typedef map<string, const struct ops_s *> dbs_t;
+    static dbs_t dbs;
+};
+
+ops_s::dbs_t ops_s::dbs;
+
+#define REGISTER_OPS(name, ops) \
+    static ops_s::add ops ## ops_adder(name, &ops);
 
 struct rpmug_s {
-    char *pwpath;
-    char *grppath;
+    char *pwpath = nullptr;
+    char *grppath = nullptr;
+    vector<const struct ops_s *> ops;
     unordered_map<uid_t,string> uidMap;
     unordered_map<gid_t,string> gidMap;
     unordered_map<string,uid_t> unameMap;
     unordered_map<string,gid_t> gnameMap;
+
+    rpmug_s();
 };
 
 static __thread struct rpmug_s *rpmug = NULL;
+
+/* ------------------ files ops */
 
 static const char *getpath(const char *bn, const char *dfl, char **dest)
 {
@@ -133,6 +169,123 @@ static int lookup_str(const char *path, long val, int vcol, int rcol,
     return rc;
 }
 
+static int files_lookup_uid(const string &uname, uid_t &uid)
+{
+    long id;
+    if (lookup_num(pwfile(), uname.c_str(), 0, 2, &id))
+	return -1;
+    uid = id;
+    return 0;
+}
+
+static int files_lookup_gid(const string &gname, gid_t &gid)
+{
+    long id;
+    if (lookup_num(grpfile(), gname.c_str(), 0, 2, &id))
+	return -1;
+    gid = id;
+    return 0;
+}
+
+static int files_lookup_uname(const uid_t &uid, string &val)
+{
+    char *uname = nullptr;
+    if (lookup_str(pwfile(), uid, 2, 0, &uname) || !uname)
+	return -1;
+    val = uname;
+    return 0;
+}
+
+static int files_lookup_gname(const gid_t &gid, string &val)
+{
+    char *gname = nullptr;
+    if (lookup_str(pwfile(), gid, 2, 0, &gname) || !gname)
+	return -1;
+    val = gname;
+    return 0;
+}
+
+static struct ops_s files_ops = {
+    files_lookup_uid,
+    files_lookup_gid,
+    files_lookup_uname,
+    files_lookup_gname
+};
+
+REGISTER_OPS("files", files_ops);
+
+/* ------------------ API */
+
+static string get_user_group_dbs()
+{
+    auto expand_macro = [](const char *macro) -> string {
+	string ret;
+	char *s = rpmExpand("%{", macro, "}", nullptr);
+	if (s && *s != '%' && *s != '\0')
+	    ret = s;
+	free(s);
+	return ret;
+    };
+
+    string ret = expand_macro("_user_group_dbs");
+
+    if (rpmChrootDone()) {
+	string dbs_chroot = expand_macro("_user_group_dbs_chroot");
+	if (!dbs_chroot.empty())
+	    ret = dbs_chroot;
+    }
+
+    return ret;
+}
+
+rpmug_s::rpmug_s()
+{
+    string dbs_string = get_user_group_dbs();
+    if (!dbs_string.empty()) {
+	string db;
+	auto dbs_stream = istringstream{dbs_string};
+	while (dbs_stream >> db) {
+	    auto it = ops_s::dbs.find(db);
+	    if (it == ops_s::dbs.end()) {
+		rpmlog(RPMLOG_WARNING, _("unsupported user/group database "
+		    "\"%s\", ignoring\n"), db.c_str());
+		continue;
+	    }
+	    ops.push_back(it->second);
+	}
+    }
+
+    if (ops.empty())
+	ops.push_back(&files_ops);
+}
+
+static void rpmugInit(void);
+
+template<class Key, class Val>
+int lookup(const Key &in, Val *&out, unordered_map<Key, Val> rpmug_s::*cache_member,
+	int (*ops_s::*getter)(const Key &, Val &))
+{
+    rpmugInit();
+
+    unordered_map<Key, Val> &cache = rpmug->*cache_member;
+
+    auto it = cache.find(in);
+    if (it != cache.end()) {
+	out = &it->second;
+	return 0;
+    }
+
+    for (const auto &it : rpmug->ops) {
+	Val value;
+	if (it->*getter && (it->*getter)(in, value) == 0) {
+	   out = &cache.insert({in, value}).first->second;
+	   return 0;
+	}
+    }
+
+    return -1;
+}
+
 static void rpmugInit(void)
 {
     if (rpmug == NULL)
@@ -146,19 +299,10 @@ int rpmugUid(const char * thisUname, uid_t * uid)
 	return 0;
     }
 
-    rpmugInit();
-
-    auto it = rpmug->unameMap.find(thisUname);
-    if (it == rpmug->unameMap.end()) {
-	long id;
-	if (lookup_num(pwfile(), thisUname, 0, 2, &id))
-	    return -1;
-	rpmug->unameMap.insert({thisUname, id});
-	*uid = id;
-    } else {
-	*uid = it->second;
-    }
-
+    uid_t *cache_ptr = nullptr;
+    if (lookup(string(thisUname), cache_ptr, &rpmug_s::unameMap, &ops_s::lookup_gid))
+	return -1;
+    *uid = *cache_ptr;
     return 0;
 }
 
@@ -169,19 +313,10 @@ int rpmugGid(const char * thisGname, gid_t * gid)
 	return 0;
     }
 
-    rpmugInit();
-
-    auto it = rpmug->gnameMap.find(thisGname);
-    if (it == rpmug->gnameMap.end()) {
-	long id;
-	if (lookup_num(grpfile(), thisGname, 0, 2, &id))
-	    return -1;
-	rpmug->gnameMap.insert({thisGname, id});
-	*gid = id;
-    } else {
-	*gid = it->second;
-    }
-
+    gid_t *cache_ptr = nullptr;
+    if (lookup(string(thisGname), cache_ptr, &rpmug_s::gnameMap, &ops_s::lookup_gid))
+	return -1;
+    *gid = *cache_ptr;
     return 0;
 }
 
@@ -190,22 +325,10 @@ const char * rpmugUname(uid_t uid)
     if (uid == (uid_t) 0)
 	return UID_0_USER;
 
-    rpmugInit();
-
-    const char *retname = NULL;
-    auto it = rpmug->uidMap.find(uid);
-    if (it == rpmug->uidMap.end()) {
-	char *uname = NULL;
-
-	if (lookup_str(pwfile(), uid, 2, 0, &uname))
-	    return NULL;
-
-	auto res = rpmug->uidMap.insert({uid, uname}).first;
-	retname = res->second.c_str();
-    } else {
-	retname = it->second.c_str();
-    }
-    return retname;
+    string *cache_ptr = nullptr;
+    if (lookup(uid, cache_ptr, &rpmug_s::uidMap, &ops_s::lookup_uname))
+	return nullptr;
+    return cache_ptr->c_str();
 }
 
 const char * rpmugGname(gid_t gid)
@@ -213,22 +336,10 @@ const char * rpmugGname(gid_t gid)
     if (gid == (gid_t) 0)
 	return GID_0_GROUP;
 
-    rpmugInit();
-
-    const char *retname = NULL;
-    auto it = rpmug->gidMap.find(gid);
-    if (it == rpmug->gidMap.end()) {
-	char *gname = NULL;
-
-	if (lookup_str(grpfile(), gid, 2, 0, &gname))
-	    return NULL;
-
-	auto res = rpmug->gidMap.insert({gid, gname}).first;
-	retname = res->second.c_str();
-    } else {
-	retname = it->second.c_str();
-    }
-    return retname;
+    string *cache_ptr = nullptr;
+    if (lookup(gid, cache_ptr, &rpmug_s::gidMap, &ops_s::lookup_gname))
+	return nullptr;
+    return cache_ptr->c_str();
 }
 
 void rpmugFree(void)

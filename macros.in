@@ -145,6 +145,11 @@
 #%__systemd_sysusers	@__SYSTEMD_SYSUSERS@
 %__systemd_sysusers	%{_rpmconfigdir}/sysusers.sh
 
+# User / group backend database lookup order, the only currently supported
+# value is "files"
+%_user_group_dbs        files
+%_user_group_dbs_chroot files
+
 #
 #	Path to script that creates debug symbols in a /usr/lib/debug
 #	shadow tree.

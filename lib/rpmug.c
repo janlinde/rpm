@@ -228,9 +228,13 @@ static string get_user_group_dbs()
     };
 
     string ret = expand_macro("_user_group_dbs");
+    if (const char *tmp = ::getenv("RPM_USER_GROUP_DBS"))
+	ret = tmp;
 
     if (rpmChrootDone()) {
 	string dbs_chroot = expand_macro("_user_group_dbs_chroot");
+	if (const char *tmp = ::getenv("RPM_USER_GROUP_DBS_CHROOT"))
+	    dbs_chroot = tmp;
 	if (!dbs_chroot.empty())
 	    ret = dbs_chroot;
     }

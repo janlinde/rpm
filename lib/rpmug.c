@@ -267,7 +267,7 @@ static void rpmugInit(void);
 
 template<class Key, class Val>
 int lookup(const Key &in, Val *&out, unordered_map<Key, Val> rpmug_s::*cache_member,
-	int (*ops_s::*getter)(const Key &, Val &))
+	const Val &negative, int (*ops_s::*getter)(const Key &, Val &))
 {
     rpmugInit();
 
@@ -275,6 +275,8 @@ int lookup(const Key &in, Val *&out, unordered_map<Key, Val> rpmug_s::*cache_mem
 
     auto it = cache.find(in);
     if (it != cache.end()) {
+	if (it->second == negative)
+	    return -1;
 	out = &it->second;
 	return 0;
     }
@@ -286,6 +288,8 @@ int lookup(const Key &in, Val *&out, unordered_map<Key, Val> rpmug_s::*cache_mem
 	   return 0;
 	}
     }
+
+    cache.insert({in, negative});
 
     return -1;
 }
@@ -304,7 +308,8 @@ int rpmugUid(const char * thisUname, uid_t * uid)
     }
 
     uid_t *cache_ptr = nullptr;
-    if (lookup(string(thisUname), cache_ptr, &rpmug_s::unameMap, &ops_s::lookup_gid))
+    if (lookup(string(thisUname), cache_ptr, &rpmug_s::unameMap, (uid_t)-1,
+	    &ops_s::lookup_uid))
 	return -1;
     *uid = *cache_ptr;
     return 0;
@@ -318,7 +323,8 @@ int rpmugGid(const char * thisGname, gid_t * gid)
     }
 
     gid_t *cache_ptr = nullptr;
-    if (lookup(string(thisGname), cache_ptr, &rpmug_s::gnameMap, &ops_s::lookup_gid))
+    if (lookup(string(thisGname), cache_ptr, &rpmug_s::gnameMap, (gid_t)-1,
+	    &ops_s::lookup_gid))
 	return -1;
     *gid = *cache_ptr;
     return 0;
@@ -329,8 +335,9 @@ const char * rpmugUname(uid_t uid)
     if (uid == (uid_t) 0)
 	return UID_0_USER;
 
+    static const string negative;
     string *cache_ptr = nullptr;
-    if (lookup(uid, cache_ptr, &rpmug_s::uidMap, &ops_s::lookup_uname))
+    if (lookup(uid, cache_ptr, &rpmug_s::uidMap, negative, &ops_s::lookup_uname))
 	return nullptr;
     return cache_ptr->c_str();
 }
@@ -340,8 +347,9 @@ const char * rpmugGname(gid_t gid)
     if (gid == (gid_t) 0)
 	return GID_0_GROUP;
 
+    static const string negative;
     string *cache_ptr = nullptr;
-    if (lookup(gid, cache_ptr, &rpmug_s::gidMap, &ops_s::lookup_gname))
+    if (lookup(gid, cache_ptr, &rpmug_s::gidMap, negative, &ops_s::lookup_gname))
 	return nullptr;
     return cache_ptr->c_str();
 }
